@@ -40,10 +40,6 @@
 
 #define CHECK_FLAG(x, f) (!((x &~ f) == x))
 
-#ifndef HOSTNAME
-#define HOSTNAME "esp-relay-" VERSION
-#endif
-
 enum AppSettings: uint8_t {
   PowerOnState = (1 << 0),
   PresenceAutoSwitchOn = (1 << 1),
@@ -100,7 +96,7 @@ bool checkMqtt() {
 }
 
 void setup() {
-  #if DEBUG
+  #ifdef DEBUG
   Serial.begin(9600);
   #endif
 
@@ -109,7 +105,6 @@ void setup() {
 
   WiFi.setAutoConnect(true);
   WiFi.setAutoReconnect(true);
-  WiFi.hostname(HOSTNAME);
   WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE);
 
   ArduinoOTA.begin();
@@ -124,6 +119,10 @@ void loop() {
 
     return;
   }
+
+  #ifdef DEBUG
+  Serial.print(WiFi.localIP());
+  #endif
 
   if (!appInitComplete) {
     if (millis() - appInitMillis > APP_INIT_TIMEOUT) {
@@ -166,7 +165,7 @@ void loop() {
 }
 
 void onMqttMessage(char* topic, byte* payload, unsigned int length) {
-  #if DEBUG
+  #ifdef DEBUG
   Serial.print("MQTT message handler for: ");
   Serial.println(topic);
   Serial.println((char*)payload);
@@ -185,7 +184,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
     if ((msg == "on" || msg == "1" || msg == "true") && msg != "0") targetState = 1;
     else targetState = 0;
 
-    #if DEBUG
+    #ifdef DEBUG
     Serial.print("Updated target state to: ");
     Serial.println(targetState);
     #endif
