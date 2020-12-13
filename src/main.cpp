@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
-#include <ESP8266httpUpdate.h>
 #include <ArduinoOTA.h>
 #include "version.h"
 
@@ -9,217 +8,176 @@
 #define SWITCH_RELAY_PIN              0 // GPIO0
 #endif
 
-#ifndef PRESENCE_SENSOR_PIN
-#define PRESENCE_SENSOR_PIN           2 // GPIO2
+#ifndef MOTION_SENSOR_PIN
+#define MOTION_SENSOR_PIN             2 // GPIO2
 #endif
 
-#define RELAY_SWITCH_DELAY            100
-#define RELAY_SWITCH_TIMEOUT          600000 // 10 minutes
-#define PRESENCE_SENSOR_DELAY         100
-#define APP_INIT_TIMEOUT              2500 // 3 seconds
+#define SWITCH_TIMEOUT_MILLIS         20000
+#define MOTION_SENSOR_READ_INTERVAL   100
+#define APP_INIT_DELAY_MILLIS         2500
 
 #define WIFI_SSID                     "qx.zone"
 #define WIFI_PASSPHRASE               "1234Qwer-"
-#define WIFI_RECONNECT_MILLIS         5000
+#define WIFI_RECONNECT_MILLIS         1000
+#define WIFI_WATCHDOG_MILLIS          5*60000
 
-#ifndef MQTT_CLIENT_ID
-#define MQTT_CLIENT_ID                "light-switch"
+#ifndef WIFI_HOSTNAME
+#define WIFI_HOSTNAME                 "light-switch-02"
 #endif
 
-#define MQTT_CONTROL_TOPIC            "hallway/light/set"
-#define MQTT_STATE_TOPIC              "hallway/light"
+#define MQTT_SERVER_NAME              "ns2.in.qx.zone"
+#define MQTT_SERVER_PORT              1883
+#define MQTT_USERNAME                 NULL
+#define MQTT_PASSWORD                 NULL
+#define MQTT_RECONNECT_MILLIS         5000
+
+#ifndef MQTT_CLIENT_ID
+#define MQTT_CLIENT_ID                WIFI_HOSTNAME
+#endif
+
 #define MQTT_STATUS_TOPIC             "hallway/light/status"
-#define MQTT_PRESENCE_TOPIC           "hallway/presence"
-#define MQTT_SETTINGS_TOPIC           "hallway/settings"
-#define MQTT_OTA_UPDATE_TOPIC         "hallway/ota/update"
-#define MQTT_OTA_STATUS_TOPIC         "hallway/ota/status"
-#define MQTT_RESTART_TOPIC            "hallway/restart"
+#define MQTT_MOTION_TOPIC             "hallway/presence"
+#define MQTT_SWITCH_STATE_TOPIC       "hallway/light"
+#define MQTT_SWITCH_CONTROL_TOPIC     "hallway/light/set"
+#define MQTT_RESTART_CONTROL_TOPIC    "hallway/restart"
 
-#define MQTT_AT_MOST_ONCE             0
-#define MQTT_AT_LEAST_ONCE            1
+#define MQTT_STATUS_ONLINE_MSG        "online"
+#define MQTT_STATUS_OFFLINE_MSG       "offline"
 
-#define CHECK_FLAG(x, f) (!((x &~ f) == x))
+typedef enum SwitchState : bool { On = true, Off = false } SwitchState_t;
+typedef enum MotionState : bool { Detected = true, Idle = false } MotionState_t;
 
-enum AppSettings: uint8_t {
-  PowerOnState = (1 << 0),
-  PresenceAutoSwitchOn = (1 << 1),
-  PresenceAutoSwitchOff = (1 << 2)
-  // Last 4 bits reserved to timeout minutes value
-};
+static const String PubSubSwitchControlTopic = String(MQTT_SWITCH_CONTROL_TOPIC);
+static const String PubSubRestartControlTopic = String(MQTT_RESTART_CONTROL_TOPIC);
+
+unsigned long 
+  now = 0,
+  switchOffTime = 0,
+  lastWifiOnline = 0,
+  lastPubSubReconnectAttempt = 0,
+  lastMotionSensorRead = 0;
+
+MotionState_t motionState = Idle;
+SwitchState_t switchState = Off;
+
+WiFiClient wifiClient;
+PubSubClient pubSubClient(wifiClient);
 
 void onMqttMessage(char* topic, byte* payload, unsigned int length);
 
-const byte mqtt_server[] = { 10, 9, 9, 96 };
+void setup() {
+  pinMode(MOTION_SENSOR_PIN, INPUT);
+  pinMode(SWITCH_RELAY_PIN, OUTPUT);
+  digitalWrite(SWITCH_RELAY_PIN, 0);
 
-unsigned long 
-  lastWifiReconnect = 0,
-  lastRelaySwitch = 0,
-  lastPresenceRead = 0,
-  switchTimeoutMillis = RELAY_SWITCH_TIMEOUT,
-  appInitMillis = 0;
+  WiFi.hostname(WIFI_HOSTNAME);
+  WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE);
 
-uint8_t
-  appSettings = 0b10100110, // 10 minutes timeout
-  appInitComplete = 0,
-  currentState = 0,
-  targetState = 0,
-  presenceState = 0;
+  ArduinoOTA.setRebootOnSuccess(true);
+  ArduinoOTA.begin();
 
-WiFiClient wifiClient;
-PubSubClient mqttClient = PubSubClient(mqtt_server, 1883, onMqttMessage, wifiClient);
-
-void publishCurrentState() {
-  mqttClient.publish(MQTT_STATE_TOPIC, currentState ? "1" : "0", true);
+  pubSubClient.setCallback(onMqttMessage);
+  pubSubClient.setServer(MQTT_SERVER_NAME, MQTT_SERVER_PORT);
+ 
+  now = millis();
+  lastWifiOnline = now;
+  lastMotionSensorRead = now + APP_INIT_DELAY_MILLIS; // delay first presence reading
 }
 
-void publishCurrentPresence() {
-  mqttClient.publish(MQTT_PRESENCE_TOPIC, presenceState ? "1" : "0", true);
+bool publishSwitchState() {
+  return 
+    pubSubClient.connected() && 
+    pubSubClient.publish(MQTT_SWITCH_STATE_TOPIC, switchState == On ? "1" : "0", true);
 }
 
-bool checkMqtt() {
-  if (mqttClient.connected()) return true;
+bool publishMotionState() {
+  return 
+    pubSubClient.connected() && 
+    pubSubClient.publish(MQTT_MOTION_TOPIC, motionState == Detected ? "1" : "0", true);
+}
 
-  if (mqttClient.connect(MQTT_CLIENT_ID, NULL, NULL, MQTT_STATUS_TOPIC, MQTT_AT_LEAST_ONCE, true, "offline", false)) {
-    mqttClient.publish(MQTT_STATUS_TOPIC, "online", true);
-    mqttClient.subscribe(MQTT_CONTROL_TOPIC, MQTT_AT_MOST_ONCE);
-    mqttClient.subscribe(MQTT_SETTINGS_TOPIC, MQTT_AT_LEAST_ONCE);
-    mqttClient.subscribe(MQTT_OTA_UPDATE_TOPIC, MQTT_AT_MOST_ONCE);
-    mqttClient.subscribe(MQTT_RESTART_TOPIC, MQTT_AT_MOST_ONCE);
+bool reconnectPubSub() {
+  if (now - lastPubSubReconnectAttempt > MQTT_RECONNECT_MILLIS) {
+    lastPubSubReconnectAttempt = now;
 
-    publishCurrentState();
-    publishCurrentPresence();
-
-    return true;
+    if (pubSubClient.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD, MQTT_STATUS_TOPIC, MQTTQOS0, true, MQTT_STATUS_OFFLINE_MSG, false)) {
+      pubSubClient.publish(MQTT_STATUS_TOPIC, VERSION, true);
+      
+      pubSubClient.subscribe(MQTT_SWITCH_CONTROL_TOPIC, MQTTQOS0);
+      pubSubClient.subscribe(MQTT_RESTART_CONTROL_TOPIC, MQTTQOS0);
+    }
+    
+    return pubSubClient.connected();
   }
 
   return false;
 }
 
-void setup() {
-  #ifdef DEBUG
-  Serial.begin(9600);
-  #endif
+void pubSubClientLoop() {
+  if (pubSubClient.connected() || reconnectPubSub()) 
+    pubSubClient.loop();
+}
 
-  pinMode(SWITCH_RELAY_PIN, OUTPUT);
-  digitalWrite(SWITCH_RELAY_PIN, currentState);
+bool wifiLoop() {
+  if (WiFi.status() != WL_CONNECTED) {
+    if(now - lastWifiOnline > WIFI_WATCHDOG_MILLIS) ESP.restart();
 
-  WiFi.setAutoConnect(true);
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE);
+    return false;
+  }
+  
+  lastWifiOnline = now;
+  return true;
+}
 
-  ArduinoOTA.begin();
-
-  appInitMillis = lastPresenceRead = millis(); // delay first presence reading
+void setSwitch(SwitchState_t newSwitchState) {
+  if (switchState == On) switchOffTime = now + SWITCH_TIMEOUT_MILLIS;
+  if (switchState == newSwitchState) return;
+ 
+  switchState = newSwitchState;
+  digitalWrite(SWITCH_RELAY_PIN, switchState == On ? 1 : 0);
+  
+  publishSwitchState();
 }
 
 void loop() {
-  if ((!WiFi.isConnected() || !checkMqtt()) && millis() - lastWifiReconnect > WIFI_RECONNECT_MILLIS) {
-    lastWifiReconnect = millis();
-    WiFi.reconnect();
+  now = millis();
 
-    return;
+  if (wifiLoop()) {
+    pubSubClientLoop();
+    ArduinoOTA.handle();
   }
 
-  #ifdef DEBUG
-  Serial.print(WiFi.localIP());
-  #endif
+  if (now - lastMotionSensorRead > MOTION_SENSOR_READ_INTERVAL) {
+    lastMotionSensorRead = now;
 
-  if (!appInitComplete) {
-    if (millis() - appInitMillis > APP_INIT_TIMEOUT) {
-      appInitComplete = 1;
-      targetState = CHECK_FLAG(appSettings, AppSettings::PowerOnState) ? 1 : 0;
+    MotionState_t newMotionState = digitalRead(MOTION_SENSOR_PIN) > 0 ? Detected : Idle;
+    if (motionState != newMotionState) {
+      motionState = newMotionState;
+      publishMotionState();
     }
+
+    if (motionState == Detected) 
+      setSwitch(On);
   }
 
-  if (millis() - lastPresenceRead > PRESENCE_SENSOR_DELAY) {
-    lastPresenceRead = millis();
-
-    bool presenceDetected = (digitalRead(PRESENCE_SENSOR_PIN) != 0);
-    if (presenceDetected != (presenceState > 0)) {
-      presenceState = presenceDetected ? 1 : 0;
-
-      publishCurrentPresence();
-
-      if ((presenceState && CHECK_FLAG(appSettings, AppSettings::PresenceAutoSwitchOn)) ||
-        (!presenceState && CHECK_FLAG(appSettings, AppSettings::PresenceAutoSwitchOff))) {
-        targetState = presenceState;
-      }
-    }
-  }
-
-  if (currentState && millis() - lastRelaySwitch > switchTimeoutMillis) {
-    targetState = 0;
-  }
-
-  if (currentState != targetState && millis() - lastRelaySwitch > RELAY_SWITCH_DELAY) {
-    lastRelaySwitch = millis();
-
-    digitalWrite(SWITCH_RELAY_PIN, targetState);
-    currentState = targetState;
-    
-    publishCurrentState();
-  }
-
-  mqttClient.loop();
-  ArduinoOTA.handle();
+  if (switchState == On && now >= switchOffTime) 
+    setSwitch(Off);
 }
 
 void onMqttMessage(char* topic, byte* payload, unsigned int length) {
-  #ifdef DEBUG
-  Serial.print("MQTT message handler for: ");
-  Serial.println(topic);
-  Serial.println((char*)payload);
-  Serial.println();
-  #endif
+  if (!length) return;
 
-  String topicStr = String(topic);
-  if (topicStr == MQTT_CONTROL_TOPIC) {
-    if (length == 0) return;
+  String msg = String((char*)payload);
+  msg.setCharAt(length, 0);
+  msg.trim();
+  msg.toLowerCase();
 
-    String msg = String((char*)payload);
-    msg.setCharAt(length, 0);
-    msg.trim();
-    msg.toLowerCase();
-
-    if ((msg == "on" || msg == "1" || msg == "true") && msg != "0") targetState = 1;
-    else targetState = 0;
-
-    #ifdef DEBUG
-    Serial.print("Updated target state to: ");
-    Serial.println(targetState);
-    #endif
+  if (PubSubSwitchControlTopic == (String)topic) {
+    if (msg.equals("1") || msg.equals("on") || msg.equals("true")) setSwitch(On);
+    else if (msg.equals("0") || msg.equals("off") || msg.equals("false")) setSwitch(Off);
   }
-  else if (topicStr == MQTT_SETTINGS_TOPIC) {
-    if (length != 1) return;
-    appSettings = payload[0];
-    switchTimeoutMillis = (appSettings >> 4) * 60000;
-    if (switchTimeoutMillis == 0) switchTimeoutMillis = RELAY_SWITCH_TIMEOUT;
-    appInitMillis = 0;
-  }
-  else if (topicStr == MQTT_OTA_UPDATE_TOPIC) {
-    if (length == 0) return;
-
-    String msg = String((char*)payload);
-    msg.setCharAt(length, 0);
-
-    char statusStr[255];
-    t_httpUpdate_return ret = ESPhttpUpdate.update(wifiClient, msg);
-    switch (ret) {
-      case HTTP_UPDATE_FAILED:
-        sprintf(statusStr, "HTTP_UPDATE_FAILD Error (%d): %s", ESPhttpUpdate.getLastError(), ESPhttpUpdate.getLastErrorString().c_str());
-        break;
-      case HTTP_UPDATE_NO_UPDATES:
-        sprintf(statusStr, "HTTP_UPDATE_NO_UPDATES");
-        break;
-      case HTTP_UPDATE_OK:
-        sprintf(statusStr, "HTTP_UPDATE_OK");
-        break;
-    }
-
-    mqttClient.publish(MQTT_OTA_STATUS_TOPIC, statusStr, true);
-    ESP.restart();
-  }
-  else if (topicStr == MQTT_RESTART_TOPIC) {
-    ESP.restart();
+  else if (PubSubRestartControlTopic == (String)topic) {
+    if (msg == "1") ESP.restart();
+    else if (msg == "2") ESP.reset();
   }
 }
