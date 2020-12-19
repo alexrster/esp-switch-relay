@@ -57,6 +57,10 @@ unsigned long
   lastPubSubReconnectAttempt = 0,
   lastMotionSensorRead = 0;
 
+bool
+  shouldPublishMotionState = false,
+  shouldPublishSwitchState = false;
+
 MotionState_t motionState = Idle;
 SwitchState_t switchState = Off;
 
@@ -86,13 +90,11 @@ void setup() {
 
 bool publishSwitchState() {
   return 
-    pubSubClient.connected() && 
     pubSubClient.publish(MQTT_SWITCH_STATE_TOPIC, switchState == On ? "1" : "0", true);
 }
 
 bool publishMotionState() {
   return 
-    pubSubClient.connected() && 
     pubSubClient.publish(MQTT_MOTION_TOPIC, motionState == Detected ? "1" : "0", true);
 }
 
@@ -114,8 +116,15 @@ bool reconnectPubSub() {
 }
 
 void pubSubClientLoop() {
-  if (pubSubClient.connected() || reconnectPubSub()) 
-    pubSubClient.loop();
+  if (!pubSubClient.connected() && !reconnectPubSub()) return;
+
+  if (shouldPublishSwitchState) 
+    shouldPublishSwitchState = !publishSwitchState();
+
+  if (shouldPublishMotionState) 
+    shouldPublishMotionState = !publishMotionState();
+
+  pubSubClient.loop();
 }
 
 bool wifiLoop() {
@@ -136,7 +145,7 @@ void setSwitch(SwitchState_t newSwitchState) {
   switchState = newSwitchState;
   digitalWrite(SWITCH_RELAY_PIN, switchState == On ? 1 : 0);
   
-  publishSwitchState();
+  shouldPublishSwitchState = true;
 }
 
 void loop() {
@@ -153,7 +162,7 @@ void loop() {
     MotionState_t newMotionState = digitalRead(MOTION_SENSOR_PIN) > 0 ? Detected : Idle;
     if (motionState != newMotionState) {
       motionState = newMotionState;
-      publishMotionState();
+      shouldPublishMotionState = true;
     }
 
     if (motionState == Detected) 
@@ -165,19 +174,31 @@ void loop() {
 }
 
 void onMqttMessage(char* topic, byte* payload, unsigned int length) {
-  if (!length) return;
-
-  String msg = String((char*)payload);
-  msg.setCharAt(length, 0);
-  msg.trim();
-  msg.toLowerCase();
+  if (length == 0) return;
 
   if (PubSubSwitchControlTopic == (String)topic) {
-    if (msg.equals("1") || msg.equals("on") || msg.equals("true")) setSwitch(On);
-    else if (msg.equals("0") || msg.equals("off") || msg.equals("false")) setSwitch(Off);
+    switch (length) {
+      case 1: 
+        switch (payload[0]) {
+          case '1': setSwitch(On); return;
+          case '0': setSwitch(Off); return;
+          default: return;
+        }
+        break;
+      case 2:
+      case 3:
+        switch (payload[1]) {
+          case 'n': setSwitch(On); return;
+          case 'f': setSwitch(Off); return;
+        }
+        break;
+      case 4: setSwitch(On); return;
+      case 5: setSwitch(Off); return;
+      default: return;
+    }
   }
   else if (PubSubRestartControlTopic == (String)topic) {
-    if (msg == "1") ESP.restart();
-    else if (msg == "2") ESP.reset();
+    if (payload[0] == '1') ESP.restart();
+    else if (payload[0] == '2') ESP.reset();
   }
 }
