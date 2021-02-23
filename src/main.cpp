@@ -54,6 +54,7 @@ unsigned long
   now = 0,
   switchOffTime = 0,
   lastWifiOnline = 0,
+  lastWifiReconnect = 0,
   lastPubSubReconnectAttempt = 0,
   lastMotionSensorRead = 0;
 
@@ -69,6 +70,10 @@ PubSubClient pubSubClient(wifiClient);
 
 void onMqttMessage(char* topic, byte* payload, unsigned int length);
 
+void restart() {
+  ESP.reset();
+}
+
 void setup() {
   pinMode(MOTION_SENSOR_PIN, INPUT);
   pinMode(SWITCH_RELAY_PIN, OUTPUT);
@@ -78,6 +83,7 @@ void setup() {
   WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE);
 
   ArduinoOTA.setRebootOnSuccess(true);
+  ArduinoOTA.onEnd(restart);
   ArduinoOTA.begin();
 
   pubSubClient.setCallback(onMqttMessage);
@@ -129,7 +135,15 @@ void pubSubClientLoop() {
 
 bool wifiLoop() {
   if (WiFi.status() != WL_CONNECTED) {
-    if(now - lastWifiOnline > WIFI_WATCHDOG_MILLIS) ESP.restart();
+    if (now - lastWifiOnline > WIFI_WATCHDOG_MILLIS) restart();
+    else if (now - lastWifiReconnect > WIFI_RECONNECT_MILLIS) {
+      lastWifiReconnect = now;
+
+      if (WiFi.reconnect()) {
+        lastWifiOnline = now;
+        return true;
+      }
+    }
 
     return false;
   }
