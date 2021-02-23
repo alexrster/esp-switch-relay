@@ -35,7 +35,8 @@
 #define MQTT_CLIENT_ID                WIFI_HOSTNAME
 #endif
 
-#define MQTT_STATUS_TOPIC             "hallway/light/status"
+#define MQTT_STATUS_TOPIC             "hallway/status"
+#define MQTT_VERSION_TOPIC            "hallway/version"
 #define MQTT_MOTION_TOPIC             "hallway/presence"
 #define MQTT_SWITCH_STATE_TOPIC       "hallway/light"
 #define MQTT_SWITCH_CONTROL_TOPIC     "hallway/light/set"
@@ -43,6 +44,8 @@
 
 #define MQTT_STATUS_ONLINE_MSG        "online"
 #define MQTT_STATUS_OFFLINE_MSG       "offline"
+
+#define OTA_UPDATE_TIMEOUT_MILLIS     5*60000
 
 typedef enum SwitchState : bool { On = true, Off = false } SwitchState_t;
 typedef enum MotionState : bool { Detected = true, Idle = false } MotionState_t;
@@ -56,11 +59,13 @@ unsigned long
   lastWifiOnline = 0,
   lastWifiReconnect = 0,
   lastPubSubReconnectAttempt = 0,
-  lastMotionSensorRead = 0;
+  lastMotionSensorRead = 0,
+  otaUpdateStart = 0;
 
 bool
   shouldPublishMotionState = false,
-  shouldPublishSwitchState = false;
+  shouldPublishSwitchState = false,
+  otaUpdateMode = false;
 
 MotionState_t motionState = Idle;
 SwitchState_t switchState = Off;
@@ -69,6 +74,11 @@ WiFiClient wifiClient;
 PubSubClient pubSubClient(wifiClient);
 
 void onMqttMessage(char* topic, byte* payload, unsigned int length);
+
+void otaStarted() {
+  otaUpdateStart = now;
+  otaUpdateMode = true;
+}
 
 void restart() {
   ESP.reset();
@@ -109,7 +119,8 @@ bool reconnectPubSub() {
     lastPubSubReconnectAttempt = now;
 
     if (pubSubClient.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD, MQTT_STATUS_TOPIC, MQTTQOS0, true, MQTT_STATUS_OFFLINE_MSG, false)) {
-      pubSubClient.publish(MQTT_STATUS_TOPIC, VERSION, true);
+      pubSubClient.publish(MQTT_STATUS_TOPIC, MQTT_STATUS_ONLINE_MSG, true);
+      pubSubClient.publish(MQTT_VERSION_TOPIC, VERSION, true);
       
       pubSubClient.subscribe(MQTT_SWITCH_CONTROL_TOPIC, MQTTQOS0);
       pubSubClient.subscribe(MQTT_RESTART_CONTROL_TOPIC, MQTTQOS0);
@@ -164,6 +175,11 @@ void setSwitch(SwitchState_t newSwitchState) {
 
 void loop() {
   now = millis();
+
+  if (otaUpdateMode) {
+    if (now - otaUpdateStart > OTA_UPDATE_TIMEOUT_MILLIS) ESP.restart();
+    return;
+  }
 
   if (wifiLoop()) {
     pubSubClientLoop();
