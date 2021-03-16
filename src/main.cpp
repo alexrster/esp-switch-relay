@@ -22,7 +22,7 @@
 #define WIFI_WATCHDOG_MILLIS          5*60000
 
 #ifndef WIFI_HOSTNAME
-#define WIFI_HOSTNAME                 "light-switch-02"
+#define WIFI_HOSTNAME                 "light-switch-01"
 #endif
 
 #define MQTT_SERVER_NAME              "ns2.in.qx.zone"
@@ -35,8 +35,7 @@
 #define MQTT_CLIENT_ID                WIFI_HOSTNAME
 #endif
 
-#define MQTT_STATUS_TOPIC             "hallway/status"
-#define MQTT_VERSION_TOPIC            "hallway/version"
+#define MQTT_STATUS_TOPIC             "hallway/light/status"
 #define MQTT_MOTION_TOPIC             "hallway/presence"
 #define MQTT_SWITCH_STATE_TOPIC       "hallway/light"
 #define MQTT_SWITCH_CONTROL_TOPIC     "hallway/light/set"
@@ -44,8 +43,6 @@
 
 #define MQTT_STATUS_ONLINE_MSG        "online"
 #define MQTT_STATUS_OFFLINE_MSG       "offline"
-
-#define OTA_UPDATE_TIMEOUT_MILLIS     5*60000
 
 typedef enum SwitchState : bool { On = true, Off = false } SwitchState_t;
 typedef enum MotionState : bool { Detected = true, Idle = false } MotionState_t;
@@ -57,15 +54,12 @@ unsigned long
   now = 0,
   switchOffTime = 0,
   lastWifiOnline = 0,
-  lastWifiReconnect = 0,
   lastPubSubReconnectAttempt = 0,
-  lastMotionSensorRead = 0,
-  otaUpdateStart = 0;
+  lastMotionSensorRead = 0;
 
 bool
   shouldPublishMotionState = false,
-  shouldPublishSwitchState = false,
-  otaUpdateMode = false;
+  shouldPublishSwitchState = false;
 
 MotionState_t motionState = Idle;
 SwitchState_t switchState = Off;
@@ -74,15 +68,6 @@ WiFiClient wifiClient;
 PubSubClient pubSubClient(wifiClient);
 
 void onMqttMessage(char* topic, byte* payload, unsigned int length);
-
-void otaStarted() {
-  otaUpdateStart = now;
-  otaUpdateMode = true;
-}
-
-void restart() {
-  ESP.reset();
-}
 
 void setup() {
   pinMode(MOTION_SENSOR_PIN, INPUT);
@@ -93,7 +78,6 @@ void setup() {
   WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE);
 
   ArduinoOTA.setRebootOnSuccess(true);
-  ArduinoOTA.onEnd(restart);
   ArduinoOTA.begin();
 
   pubSubClient.setCallback(onMqttMessage);
@@ -119,8 +103,7 @@ bool reconnectPubSub() {
     lastPubSubReconnectAttempt = now;
 
     if (pubSubClient.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD, MQTT_STATUS_TOPIC, MQTTQOS0, true, MQTT_STATUS_OFFLINE_MSG, false)) {
-      pubSubClient.publish(MQTT_STATUS_TOPIC, MQTT_STATUS_ONLINE_MSG, true);
-      pubSubClient.publish(MQTT_VERSION_TOPIC, VERSION, true);
+      pubSubClient.publish(MQTT_STATUS_TOPIC, VERSION, true);
       
       pubSubClient.subscribe(MQTT_SWITCH_CONTROL_TOPIC, MQTTQOS0);
       pubSubClient.subscribe(MQTT_RESTART_CONTROL_TOPIC, MQTTQOS0);
@@ -146,15 +129,7 @@ void pubSubClientLoop() {
 
 bool wifiLoop() {
   if (WiFi.status() != WL_CONNECTED) {
-    if (now - lastWifiOnline > WIFI_WATCHDOG_MILLIS) restart();
-    else if (now - lastWifiReconnect > WIFI_RECONNECT_MILLIS) {
-      lastWifiReconnect = now;
-
-      if (WiFi.reconnect()) {
-        lastWifiOnline = now;
-        return true;
-      }
-    }
+    if(now - lastWifiOnline > WIFI_WATCHDOG_MILLIS) ESP.restart();
 
     return false;
   }
@@ -175,11 +150,6 @@ void setSwitch(SwitchState_t newSwitchState) {
 
 void loop() {
   now = millis();
-
-  if (otaUpdateMode) {
-    if (now - otaUpdateStart > OTA_UPDATE_TIMEOUT_MILLIS) ESP.restart();
-    return;
-  }
 
   if (wifiLoop()) {
     pubSubClientLoop();
