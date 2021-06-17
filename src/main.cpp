@@ -12,8 +12,13 @@
 #define MOTION_SENSOR_PIN             2 // GPIO2
 #endif
 
+#ifndef DOOR_SENSOR_PIN
+#define DOOR_SENSOR_PIN               1 // GPIO1
+#endif
+
 #define SWITCH_TIMEOUT_MILLIS         20000
 #define MOTION_SENSOR_READ_INTERVAL   100
+#define DOOR_SENSOR_READ_INTERVAL     100
 #define APP_INIT_DELAY_MILLIS         2500
 
 #define WIFI_SSID                     "qx.zone"
@@ -35,17 +40,18 @@
 #define MQTT_CLIENT_ID                WIFI_HOSTNAME
 #endif
 
-#define MQTT_STATUS_TOPIC             "hallway/light/status"
+#define MQTT_STATUS_TOPIC             "hallway/version"
 #define MQTT_MOTION_TOPIC             "hallway/presence"
+#define MQTT_DOOR_TOPIC               "hallway/door"
 #define MQTT_SWITCH_STATE_TOPIC       "hallway/light"
 #define MQTT_SWITCH_CONTROL_TOPIC     "hallway/light/set"
 #define MQTT_RESTART_CONTROL_TOPIC    "hallway/restart"
 
-#define MQTT_STATUS_ONLINE_MSG        "online"
 #define MQTT_STATUS_OFFLINE_MSG       "offline"
 
 typedef enum SwitchState : bool { On = true, Off = false } SwitchState_t;
 typedef enum MotionState : bool { Detected = true, Idle = false } MotionState_t;
+typedef enum DoorState : bool   { Open = true, Closed = false } DoorState_t;
 
 static const String PubSubSwitchControlTopic = String(MQTT_SWITCH_CONTROL_TOPIC);
 static const String PubSubRestartControlTopic = String(MQTT_RESTART_CONTROL_TOPIC);
@@ -55,14 +61,17 @@ unsigned long
   switchOffTime = 0,
   lastWifiOnline = 0,
   lastPubSubReconnectAttempt = 0,
-  lastMotionSensorRead = 0;
+  lastMotionSensorRead = 0,
+  lastDoorSensorRead = 0;
 
 bool
-  shouldPublishMotionState = false,
+  shouldPublishDoorState = true,
+  shouldPublishMotionState = true,
   shouldPublishSwitchState = false;
 
 MotionState_t motionState = Idle;
 SwitchState_t switchState = Off;
+DoorState_t   doorState = Closed;
 
 WiFiClient wifiClient;
 PubSubClient pubSubClient(wifiClient);
@@ -71,9 +80,13 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length);
 
 void setup() {
   pinMode(MOTION_SENSOR_PIN, INPUT);
+  pinMode(DOOR_SENSOR_PIN, INPUT);
   pinMode(SWITCH_RELAY_PIN, OUTPUT);
   digitalWrite(SWITCH_RELAY_PIN, 0);
 
+  WiFi.enableAP(false);
+  WiFi.setOutputPower(20.5);
+  WiFi.setSleepMode(WiFiSleepType::WIFI_NONE_SLEEP);
   WiFi.hostname(WIFI_HOSTNAME);
   WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE);
 
@@ -86,6 +99,7 @@ void setup() {
   now = millis();
   lastWifiOnline = now;
   lastMotionSensorRead = now + APP_INIT_DELAY_MILLIS; // delay first presence reading
+  lastDoorSensorRead = now + APP_INIT_DELAY_MILLIS; // delay first presence reading
 }
 
 bool publishSwitchState() {
@@ -96,6 +110,11 @@ bool publishSwitchState() {
 bool publishMotionState() {
   return 
     pubSubClient.publish(MQTT_MOTION_TOPIC, motionState == Detected ? "1" : "0", true);
+}
+
+bool publishDoorState() {
+  return 
+    pubSubClient.publish(MQTT_DOOR_TOPIC, doorState == Open ? "1" : "0", true);
 }
 
 bool reconnectPubSub() {
@@ -123,6 +142,9 @@ void pubSubClientLoop() {
 
   if (shouldPublishMotionState) 
     shouldPublishMotionState = !publishMotionState();
+
+  if (shouldPublishDoorState) 
+    shouldPublishDoorState = !publishDoorState();
 
   pubSubClient.loop();
 }
@@ -171,6 +193,16 @@ void loop() {
 
   if (switchState == On && now >= switchOffTime) 
     setSwitch(Off);
+
+  if (now - lastDoorSensorRead > DOOR_SENSOR_READ_INTERVAL) {
+    lastDoorSensorRead = now;
+
+    DoorState_t newDoorState = digitalRead(DOOR_SENSOR_PIN) > 0 ? Open : Closed;
+    if (doorState != newDoorState) {
+      doorState = newDoorState;
+      shouldPublishDoorState = true;
+    }
+  }
 }
 
 void onMqttMessage(char* topic, byte* payload, unsigned int length) {
