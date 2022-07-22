@@ -2,6 +2,7 @@
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoOTA.h>
+#include <Esp.h>
 #include "version.h"
 
 #ifndef SWITCH_RELAY_PIN
@@ -49,6 +50,8 @@
 
 #define MQTT_STATUS_OFFLINE_MSG       "offline"
 
+#define WDT_TIMEOUT_MS                60 * 1000
+
 typedef enum SwitchState : bool { On = true, Off = false } SwitchState_t;
 typedef enum MotionState : bool { Detected = true, Idle = false } MotionState_t;
 typedef enum DoorState : bool   { Open = true, Closed = false } DoorState_t;
@@ -78,6 +81,10 @@ PubSubClient pubSubClient(wifiClient);
 
 void onMqttMessage(char* topic, byte* payload, unsigned int length);
 
+void onOtaStart() {
+  ESP.wdtDisable();
+}
+
 void setup() {
   pinMode(MOTION_SENSOR_PIN, INPUT);
   pinMode(DOOR_SENSOR_PIN, INPUT);
@@ -91,6 +98,7 @@ void setup() {
   WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE);
 
   ArduinoOTA.setRebootOnSuccess(true);
+  ArduinoOTA.onStart(onOtaStart);
   ArduinoOTA.begin();
 
   pubSubClient.setCallback(onMqttMessage);
@@ -100,6 +108,8 @@ void setup() {
   lastWifiOnline = now;
   lastMotionSensorRead = now + APP_INIT_DELAY_MILLIS; // delay first presence reading
   lastDoorSensorRead = now + APP_INIT_DELAY_MILLIS; // delay first presence reading
+
+  ESP.wdtEnable(WDT_TIMEOUT_MS);
 }
 
 bool publishSwitchState() {
@@ -203,6 +213,8 @@ void loop() {
       shouldPublishDoorState = true;
     }
   }
+
+  ESP.wdtFeed();
 }
 
 void onMqttMessage(char* topic, byte* payload, unsigned int length) {
