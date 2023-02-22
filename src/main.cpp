@@ -22,8 +22,6 @@
 #define DOOR_SENSOR_READ_INTERVAL     100
 #define APP_INIT_DELAY_MILLIS         2500
 
-#define WIFI_SSID                     "qx.zone"
-#define WIFI_PASSPHRASE               "1234Qwer-"
 #define WIFI_RECONNECT_MILLIS         1000
 #define WIFI_WATCHDOG_MILLIS          5*60000
 
@@ -31,10 +29,7 @@
 #define WIFI_HOSTNAME                 "light-switch-01"
 #endif
 
-#define MQTT_SERVER_NAME              "ns2.in.qx.zone"
 #define MQTT_SERVER_PORT              1883
-#define MQTT_USERNAME                 NULL
-#define MQTT_PASSWORD                 NULL
 #define MQTT_RECONNECT_MILLIS         5000
 
 #ifndef MQTT_CLIENT_ID
